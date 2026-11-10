@@ -1,0 +1,138 @@
+// FarlinkOne database schema (SQLite)
+// Path database diatur oleh DATABASE_URL di .env.development / .env.production
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                 String    @id @default(cuid())
+  name               String
+  email              String    @unique
+  passwordHash       String
+  role               String    @default("ADMIN")
+  companyId          String?
+  company            Company?  @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  isActive           Boolean   @default(true)
+  mustChangePassword Boolean   @default(false)
+  lastLoginAt        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  commands           DeviceCommand[]
+  auditLogs          AuditLog[]
+
+  @@index([companyId])
+}
+
+model Company {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  contact   String?
+  address   String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  devices   Device[]
+  users     User[]
+}
+
+model Device {
+  id              String    @id @default(cuid())
+  name            String    @unique
+  serialNumber    String    @unique
+  type            String    @default("FARLINK_GO") // FARLINK_GO | FARLINK_EDGE
+  companyId       String?
+  company         Company?  @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  ipAddress       String?
+  macAddress      String?
+  firmwareVersion String?
+  agentVersion    String?
+  tokenHash       String?
+  lastSeenAt      DateTime?
+  gatewayIp       String?
+  gatewayStatus   String    @default("UNKNOWN") // REACHABLE | UNREACHABLE | UNKNOWN
+  gatewayLatency  Float?
+  gatewayCheckedAt DateTime?
+  internetStatus  String    @default("UNKNOWN")
+  scheduleEnabled Boolean   @default(false)
+  scheduleInterval Int      @default(0) // menit: 0, 15, 60, 1440
+  lastScheduledAt DateTime?
+  config          String    @default("{}") // JSON
+  isDemo          Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  testResults     TestResult[]
+  commands        DeviceCommand[]
+
+  @@index([companyId])
+}
+
+model TestResult {
+  id           String    @id @default(cuid())
+  deviceId     String
+  device       Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  testType     String    // SPEED | MTR | DIG | CURL | TCP_PORT
+  triggerType  String    // MANUAL | REMOTE | SCHEDULED
+  status       String    // SUCCESS | FAILED
+  target       String?
+  download     Float?
+  upload       Float?
+  latency      Float?
+  jitter       Float?
+  packetLoss   Float?
+  resultData   String    @default("{}") // JSON
+  errorMessage String?
+  startedAt    DateTime
+  completedAt  DateTime?
+  duration     Float?
+  createdAt    DateTime  @default(now())
+
+  @@index([deviceId, startedAt])
+  @@index([startedAt])
+}
+
+model DeviceCommand {
+  id           String    @id @default(cuid())
+  deviceId     String
+  device       Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  type         String    // RUN_TEST | SET_SCHEDULE | UPDATE_CONFIG | REBOOT | RESTART_AGENT | SYNC_TIME | GET_LOGS
+  payload      String    @default("{}")
+  status       String    @default("PENDING") // PENDING | SENT | RUNNING | SUCCESS | FAILED | TIMEOUT
+  createdById  String?
+  createdBy    User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  result       String?
+  errorMessage String?
+  createdAt    DateTime  @default(now())
+  sentAt       DateTime?
+  completedAt  DateTime?
+
+  @@index([deviceId, status])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    String
+  target    String?
+  detail    String?
+  createdAt DateTime @default(now())
+}
+
+model DiscoveredDevice {
+  id           String   @id @default(cuid())
+  serialNumber String   @unique
+  macAddress   String?
+  ipAddress    String?
+  deviceType   String   @default("FARLINK_GO")
+  agentVersion String?
+  lastSeenAt   DateTime @default(now())
+  isRegistered Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}

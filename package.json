@@ -1,0 +1,53 @@
+{
+  "name": "farlinkone",
+  "version": "1.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "postinstall": "prisma generate",
+    "db:migrate": "dotenv -e .env.development -- prisma migrate dev",
+    "db:seed": "dotenv -e .env.development -- tsx prisma/seed.ts",
+    "db:reset": "dotenv -e .env.development -- prisma migrate reset",
+    "db:studio": "dotenv -e .env.development -- prisma studio",
+    "db:deploy": "dotenv -e .env.production -- prisma migrate deploy",
+    "db:seed:prod": "dotenv -e .env.production -- tsx prisma/seed.ts --admin-only",
+    "db:turso:sql": "prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script -o prisma/turso-schema.sql",
+    "db:turso:push": "dotenv -e .env -- tsx prisma/turso-setup.ts",
+    "db:turso:copy": "dotenv -e .env -- tsx prisma/turso-setup.ts --copy-local",
+    "db:turso:seed": "dotenv -e .env -- tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.18.0",
+    "@prisma/adapter-libsql": "^6.19.3",
+    "@prisma/client": "^6.19.3",
+    "@types/ssh2": "^1.15.6",
+    "bcryptjs": "^3.0.3",
+    "jose": "^6.2.12",
+    "lucide-react": "^1.59.0",
+    "next": "15.5.28",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "recharts": "^3.10.1",
+    "ssh2": "^1.17.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "dotenv-cli": "^11.0.0",
+    "eslint": "^9",
+    "eslint-config-next": "15.5.28",
+    "prisma": "^6.19.3",
+    "tsx": "^4.23.15",
+    "typescript": "^5"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  }
+}
