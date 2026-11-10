@@ -11,10 +11,16 @@ import { join } from "path";
 import { createClient } from "@libsql/client";
 import { PrismaClient } from "@prisma/client";
 import { PrismaLibSQL } from "@prisma/adapter-libsql";
+import { ensureDbReady, rawUrl, rawToken } from "../src/lib/db";
 
-const url = process.env.TURSO_DATABASE_URL;
-const authToken = process.env.TURSO_AUTH_TOKEN;
+const isVercelBuild = process.argv.includes("--vercel-build");
+const url = rawUrl;
+const authToken = rawToken;
 if (!url) {
+  if (isVercelBuild) {
+    console.log("• Skip Turso setup (no remote URL configured)");
+    process.exit(0);
+  }
   console.error("✖ TURSO_DATABASE_URL belum diset");
   process.exit(1);
 }
@@ -76,6 +82,15 @@ async function copyData() {
 }
 
 (async () => {
+  if (isVercelBuild) {
+    try {
+      await ensureDbReady();
+      console.log("✔ Turso schema & admin user ready (vercel-build)");
+    } catch (err) {
+      console.warn("⚠ Turso setup warning during build:", err);
+    }
+    return;
+  }
   await pushSchema();
   if (copyLocal) await copyData();
 })().catch((e) => {

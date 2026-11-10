@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
-import { prisma } from "@/lib/db";
+import { prisma, ensureDbReady } from "@/lib/db";
 import { SESSION_COOKIE, signSession } from "@/lib/session";
 
 const schema = z.object({ email: z.string().email(), password: z.string().min(1), remember: z.boolean().optional() });
@@ -25,7 +25,23 @@ export async function POST(req: Request) {
   };
   if (!parsed.success) return fail();
 
-  const user = await prisma.user.findUnique({ where: { email: parsed.data.email.toLowerCase() } });
+  const emailLower = parsed.data.email.toLowerCase();
+  let user;
+  try {
+    user = await prisma.user.findUnique({ where: { email: emailLower } });
+    if (!user) {
+      await ensureDbReady();
+      user = await prisma.user.findUnique({ where: { email: emailLower } });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("no such table") || msg.includes("TableDoesNotExist") || msg.includes("P2021")) {
+      await ensureDbReady();
+      user = await prisma.user.findUnique({ where: { email: emailLower } });
+    } else {
+      throw err;
+    }
+  }
   if (!user || !user.isActive || !(await bcrypt.compare(parsed.data.password, user.passwordHash))) return fail();
 
   attempts.delete(ip);

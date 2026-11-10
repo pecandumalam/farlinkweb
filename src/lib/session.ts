@@ -7,8 +7,8 @@ export type SessionPayload = { sub: string; email: string; name: string; role: s
 const FALLBACK_SECRET = "dev-secret-farlinkone-0123456789abcdef0123456789abcdef";
 
 function key() {
-  const secret =
-    process.env.AUTH_SECRET && process.env.AUTH_SECRET.length >= 16 ? process.env.AUTH_SECRET : FALLBACK_SECRET;
+  const raw = process.env.AUTH_SECRET?.trim().replace(/^["']+|["']+$/g, "").trim();
+  const secret = raw && raw.length >= 16 ? raw : FALLBACK_SECRET;
   return new TextEncoder().encode(secret);
 }
 
