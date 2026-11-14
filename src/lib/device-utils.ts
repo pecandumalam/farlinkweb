@@ -82,8 +82,8 @@ export function getDeviceRole(device: {
     cfg.slave_ip ??
     null;
 
-  // Do not use P2P 192.168.99.x or localhost
-  if (typeof slaveIp === "string" && (slaveIp.startsWith("192.168.99.") || slaveIp === "127.0.0.1")) {
+  // Do not use localhost
+  if (typeof slaveIp === "string" && slaveIp === "127.0.0.1") {
     slaveIp = null;
   }
 

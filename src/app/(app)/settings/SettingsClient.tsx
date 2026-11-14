@@ -82,7 +82,6 @@ export function SettingsClient({ users, auditLogs, currentUserId, forceChange }:
   const tabs: { k: TabId; l: string }[] = [
     { k: "account", l: "My Account" },
     { k: "users", l: "Users" },
-    { k: "dummy", l: "Demo / Dummy Data" },
     { k: "auditlog", l: "Audit Log" },
   ];
 

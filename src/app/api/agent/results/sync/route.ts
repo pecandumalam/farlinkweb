@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { withDevice } from "@/lib/agent";
+import { getDeviceRole } from "@/lib/device-utils";
 
 function normalizeTestType(raw: string = "SPEED"): string {
   const up = raw.toUpperCase().trim();
@@ -27,6 +28,29 @@ export async function POST(req: Request) {
     const items = Array.isArray(body) ? body : [body];
     const created: string[] = [];
 
+    const roleInfo = getDeviceRole(d);
+    let slaveMasterIp: string | null = null;
+    if (roleInfo.edgeMode === "Slave") {
+      let dCfg: Record<string, any> = {};
+      try {
+        dCfg = JSON.parse(d.config || "{}");
+      } catch {}
+      const masterDev = await prisma.device.findFirst({
+        where: {
+          id: { not: d.id },
+          ...(d.companyId ? { companyId: d.companyId } : {}),
+          OR: [
+            { config: { contains: '"mode":"Master"' } },
+            { config: { contains: '"mode": "Master"' } },
+            { name: { contains: "Master" } },
+          ],
+        },
+        select: { ipAddress: true },
+        orderBy: { createdAt: "asc" },
+      });
+      slaveMasterIp = masterDev?.ipAddress || dCfg.master_ip || dCfg.masterIp || dCfg.systemInfo?.masterIp || "192.168.2.38";
+    }
+
     for (const it of items) {
       const rawTestType = it.test_type || it.testType || "SPEED";
       const testType = normalizeTestType(rawTestType);
@@ -40,7 +64,10 @@ export async function POST(req: Request) {
       const jitter = it.jitter_ms != null ? Number(it.jitter_ms) : (it.jitter != null ? Number(it.jitter) : null);
       const packetLoss = it.packet_loss != null ? Number(it.packet_loss) : (it.packetLoss != null ? Number(it.packetLoss) : null);
 
-      const target = it.target || it.server_ip || it.target_host || (testType === "IPERF" ? (it.master_connection?.target || "Edge Slave Node") : (testType === "SPEED" ? "Speedtest Server" : null));
+      let target = it.target || it.server_ip || it.target_host || (testType === "IPERF" ? (it.master_connection?.target || slaveMasterIp || "Edge Slave Node") : (testType === "SPEED" ? (slaveMasterIp || "Speedtest Server") : null));
+      if (slaveMasterIp && (!target || target === "speedtest.net" || target === "Speedtest Server")) {
+        target = slaveMasterIp;
+      }
       const errorMessage = it.error_message || it.errorMessage || null;
 
       const startedAt = it.started_at ? new Date(it.started_at) : (it.startedAt ? new Date(it.startedAt) : new Date());

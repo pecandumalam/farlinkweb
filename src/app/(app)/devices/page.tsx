@@ -140,6 +140,12 @@ export default async function DevicesPage({
               {rows.map((d) => {
                 const r = d.testResults[0];
                 const isSlave = d.roleInfo.edgeMode === "Slave";
+                const isMaster = d.roleInfo.edgeMode === "Master";
+                let hbLastTest: any = null;
+                try {
+                  const cfg = JSON.parse(d.config || "{}");
+                  hbLastTest = cfg?.systemInfo?.lastTestResult || null;
+                } catch {}
 
                 return (
                   <tr key={d.id}>
@@ -168,6 +174,8 @@ export default async function DevicesPage({
                         ) : (
                           "OK"
                         )
+                      ) : hbLastTest && hbLastTest.download != null ? (
+                        `${Number(hbLastTest.download).toFixed(0)}/${Number(hbLastTest.upload || 0).toFixed(0)} Mbps`
                       ) : (
                         "—"
                       )}
@@ -191,10 +199,10 @@ export default async function DevicesPage({
                           label="Edit"
                           buttonIcon={<Pencil size={13} />}
                         />
-                        {isSlave && (
+                        {(isSlave || isMaster) && (
                           <TestMasterModalButton
                             device={d}
-                            buttonLabel="Test Master"
+                            buttonLabel={isMaster ? "Log & Test Edge" : "Test Master"}
                             className="btn btn-ghost btn-sm"
                           />
                         )}

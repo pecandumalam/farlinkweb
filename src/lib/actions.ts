@@ -464,14 +464,11 @@ export async function saveConfig(deviceId: string, config: Record<string, unknow
     updatedAt: new Date().toISOString(),
   };
 
-  if (mergedConfig.slave_ip && (String(mergedConfig.slave_ip).startsWith("192.168.99.") || mergedConfig.slave_ip === "127.0.0.1")) {
+  if (mergedConfig.slave_ip && mergedConfig.slave_ip === "127.0.0.1") {
     delete mergedConfig.slave_ip;
   }
-  if (mergedConfig.slaveIp && (String(mergedConfig.slaveIp).startsWith("192.168.99.") || mergedConfig.slaveIp === "127.0.0.1")) {
+  if (mergedConfig.slaveIp && mergedConfig.slaveIp === "127.0.0.1") {
     delete mergedConfig.slaveIp;
-  }
-  if (mergedConfig.systemInfo && mergedConfig.systemInfo.slaveIp && String(mergedConfig.systemInfo.slaveIp).startsWith("192.168.99.")) {
-    delete mergedConfig.systemInfo.slaveIp;
   }
 
   const rawType = String(config.type || config.device_type || d.type).toUpperCase();
@@ -511,8 +508,8 @@ export async function saveConfig(deviceId: string, config: Record<string, unknow
   return { ok: true, message: `Configuration v${version} pushed to ${updatedDev.name} (${newType} · ${newMode})${demotedNote}` };
 }
 
-/* ---------------- Master Connection Test ---------------- */
-export async function testMasterConnection(slaveDeviceId: string): Promise<{
+/* ---------------- Master & Slave Edge Measurement Test & Log Pull ---------------- */
+export async function testMasterConnection(deviceId: string): Promise<{
   ok: boolean;
   error?: string;
   message?: string;
@@ -520,16 +517,29 @@ export async function testMasterConnection(slaveDeviceId: string): Promise<{
   data?: {
     command: string;
     status: string;
+    roleMode: "Master" | "Slave";
     masterIp: string;
+    slaveIp: string;
     masterName: string;
     slaveName: string;
     latencyMs: number | null;
     jitterMs: number | null;
     packetLoss: number | null;
     bandwidthMbps: number | null;
+    downloadMbps: number | null;
+    uploadMbps: number | null;
+    udpBandwidthMbps: number | null;
     stdout: string;
     durationSeconds: number;
     completedAt: string;
+    agentLogs?: Array<{
+      id?: number | string;
+      level?: string;
+      module?: string;
+      message?: string;
+      created_at?: string;
+      sourceDevice?: string;
+    }>;
   };
 }> {
   let s = null;
@@ -538,250 +548,342 @@ export async function testMasterConnection(slaveDeviceId: string): Promise<{
   } catch {
     s = { sub: "system", role: "ADMIN", email: "admin@farlink.local", companyId: null };
   }
-  const slave = await prisma.device.findUnique({
-    where: { id: slaveDeviceId },
+  const dev = await prisma.device.findUnique({
+    where: { id: deviceId },
     include: { company: true },
   });
-  if (!slave) return { ok: false, error: "Device not found" };
+  if (!dev) return { ok: false, error: "Device not found" };
 
-  if (s && s.role !== "ADMIN" && s.companyId && slave.companyId !== s.companyId) {
+  if (s && s.role !== "ADMIN" && s.companyId && dev.companyId !== s.companyId) {
     return { ok: false, error: "Unauthorized: You can only test devices in your company" };
   }
 
-  let slaveCfg: Record<string, any> = {};
+  let devCfg: Record<string, any> = {};
   try {
-    slaveCfg = JSON.parse(slave.config || "{}");
+    devCfg = JSON.parse(dev.config || "{}");
   } catch {}
+  const sysInfo = devCfg.systemInfo || {};
+  const roleInfo = getDeviceRole(dev);
+  const isMaster = roleInfo.edgeMode === "Master";
 
-  // Resolve Master for this company
-  let masterDevice = null;
-  if (slave.companyId) {
+  // Find peer device in the same company (Master or Slave)
+  let peerDevice = null;
+  if (dev.companyId) {
     const peers = await prisma.device.findMany({
-      where: { companyId: slave.companyId },
+      where: { companyId: dev.companyId, id: { not: dev.id } },
     });
     for (const p of peers) {
-      const role = getDeviceRole(p);
-      if (role.isEdge && role.edgeMode === "Master") {
-        masterDevice = p;
+      const pRole = getDeviceRole(p);
+      if (isMaster && pRole.isEdge && pRole.edgeMode === "Slave") {
+        peerDevice = p;
+        break;
+      }
+      if (!isMaster && pRole.isEdge && pRole.edgeMode === "Master") {
+        peerDevice = p;
         break;
       }
     }
   }
 
-  const targetMasterIp = masterDevice?.ipAddress || slaveCfg.master_ip || slaveCfg.masterIp || "192.168.1.8";
-  const masterName = masterDevice?.name ?? (masterDevice ? "FarLink Edge Master" : `Master (${targetMasterIp})`);
-  const commandStr = `ping -c 4 ${targetMasterIp} && iperf3 -c ${targetMasterIp} -p 5201 -t 3`;
+  const resolvedMasterIp = isMaster
+    ? (dev.ipAddress || "10.42.0.1")
+    : (peerDevice?.ipAddress || devCfg.master_ip || devCfg.masterIp || sysInfo.masterIp || "10.42.0.1");
 
-  // Create DeviceCommand for audit, agent polling, and UI tracking
+  const resolvedSlaveIp = isMaster
+    ? (sysInfo.slaveIp || roleInfo.slaveIp || devCfg.slave_ip || devCfg.slaveIp || peerDevice?.ipAddress || "10.42.0.10")
+    : (dev.ipAddress || "10.42.0.10");
+
+  const targetIp = isMaster ? resolvedSlaveIp : resolvedMasterIp;
+  const masterName = isMaster ? dev.name : (peerDevice?.name ?? `FarLink Edge Master (${resolvedMasterIp})`);
+  const slaveName = isMaster ? (peerDevice?.name ?? `FarLink Edge Slave (${resolvedSlaveIp})`) : dev.name;
+
+  const commandStr = `ping -c 4 ${targetIp} && iperf3 -c ${targetIp} -p 5201 -t 3 -R && iperf3 -c ${targetIp} -p 5201 -t 3 && iperf3 -c ${targetIp} -p 5201 -u -b 50M -t 2`;
+
+  // Create DeviceCommand for TEST_MASTER, SYNC_DATA, and UPLOAD_LOG so the physical Raspberry Pi pushes its SQLite results & logs immediately
   const cmd = await prisma.deviceCommand.create({
     data: {
-      deviceId: slave.id,
+      deviceId: dev.id,
       type: "TEST_MASTER",
       payload: JSON.stringify({
         command: commandStr,
-        testType: "TCP_PORT",
-        target: `${targetMasterIp}:5201`,
-        masterIp: targetMasterIp,
-        masterDeviceId: masterDevice?.id,
+        testType: "IPERF",
+        target: `${targetIp}:5201`,
+        masterIp: resolvedMasterIp,
+        slaveIp: resolvedSlaveIp,
         masterDeviceName: masterName,
-        slaveDeviceName: slave.name,
+        slaveDeviceName: slaveName,
       }),
       status: "PENDING",
       createdById: s.sub,
     },
   });
 
-  const startedTs = Date.now();
-  let latencyMs = 2.1;
-  let jitterMs = 0.2;
-  let packetLoss = 0.0;
-  let bandwidthMbps = 941.5;
-  let isConnected = true;
+  await prisma.deviceCommand.createMany({
+    data: [
+      {
+        deviceId: dev.id,
+        type: "SYNC_DATA",
+        payload: JSON.stringify({ trigger: "edge_measurement_viewer" }),
+        status: "PENDING",
+        createdById: s.sub,
+      },
+      {
+        deviceId: dev.id,
+        type: "UPLOAD_LOG",
+        payload: JSON.stringify({ limit: 80 }),
+        status: "PENDING",
+        createdById: s.sub,
+      },
+    ],
+  }).catch(() => {});
 
-  // Real socket probe check if reachable
-  try {
-    const net = await import("net");
-    const socketProbe = await new Promise<{ ok: boolean; rtt: number }>((resolve) => {
-      const t0 = Date.now();
-      const client = net.createConnection({ host: targetMasterIp, port: 5201, timeout: 1000 }, () => {
-        const rtt = Date.now() - t0;
-        client.destroy();
-        resolve({ ok: true, rtt });
-      });
-      client.on("error", () => {
-        const client2 = net.createConnection({ host: targetMasterIp, port: 22, timeout: 600 }, () => {
-          const rtt = Date.now() - t0;
-          client2.destroy();
-          resolve({ ok: true, rtt });
-        });
-        client2.on("error", () => resolve({ ok: false, rtt: 0 }));
-      });
-      client.on("timeout", () => {
-        client.destroy();
-        resolve({ ok: false, rtt: 0 });
-      });
-    });
+  // Read the latest REAL test result recorded by the physical Raspberry Pi from TestResult table
+  const latestRealTest = await prisma.testResult.findFirst({
+    where: { deviceId: dev.id },
+    orderBy: { startedAt: "desc" },
+  });
 
-    if (socketProbe.ok) {
-      latencyMs = Math.max(0.6, Math.round(socketProbe.rtt * 10) / 10);
-      jitterMs = Math.round(latencyMs * 0.12 * 10) / 10 || 0.2;
-      packetLoss = 0.0;
-      bandwidthMbps = 945.2;
-      isConnected = true;
-    } else {
-      // Local network probe simulation for Raspberry Pi cluster
-      latencyMs = Math.round((1.4 + Math.random() * 0.9) * 10) / 10;
-      jitterMs = Math.round((0.15 + Math.random() * 0.15) * 10) / 10;
-      packetLoss = 0.0;
-      bandwidthMbps = Math.round((938 + Math.random() * 8) * 10) / 10;
-      isConnected = true;
+  // Fetch recent real agent logs from AuditLog + device config.recentLogs
+  const auditLogs = await prisma.auditLog.findMany({
+    where: {
+      action: "AGENT_LOG_SYNC",
+      target: { in: [dev.name, peerDevice?.name].filter(Boolean) as string[] },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 10,
+  });
+
+  const collectedLogs: Array<{
+    id?: number | string;
+    level?: string;
+    module?: string;
+    message?: string;
+    created_at?: string;
+    sourceDevice?: string;
+  }> = [];
+
+  if (Array.isArray(devCfg.recentLogs)) {
+    for (const item of devCfg.recentLogs) {
+      collectedLogs.push({ ...item, sourceDevice: item.sourceDevice || dev.name });
     }
-  } catch {
-    latencyMs = 2.1;
-    jitterMs = 0.2;
-    packetLoss = 0.0;
-    bandwidthMbps = 942.0;
-    isConnected = true;
+  }
+  for (const row of auditLogs) {
+    try {
+      const parsed = JSON.parse(row.detail || "{}");
+      if (Array.isArray(parsed.sample)) {
+        for (const sItem of parsed.sample) {
+          collectedLogs.push({ ...sItem, sourceDevice: row.target || dev.name });
+        }
+      }
+    } catch {}
   }
 
-  const durationSec = Math.round(((Date.now() - startedTs) / 1000 + 3.1) * 10) / 10;
+  let parsedRealResultData: Record<string, any> = {};
+  if (latestRealTest?.resultData) {
+    try {
+      parsedRealResultData = JSON.parse(latestRealTest.resultData);
+    } catch {}
+  }
 
-  const stdoutLines = [
-    `[FarLink Edge Diagnostic Engine v1.1]`,
-    `Probe Mode     : FarLink Edge Slave`,
-    `Source Device  : ${slave.name} (${slave.ipAddress ?? "192.168.1.9"})`,
-    `Target Master  : ${masterName} (${targetMasterIp}:5201)`,
-    `Active Command : ${commandStr}`,
-    ``,
-    `--- PING ${targetMasterIp} (${targetMasterIp}) 56(84) bytes of data ---`,
-    `64 bytes from ${targetMasterIp}: icmp_seq=1 ttl=64 time=${(latencyMs + 0.1).toFixed(2)} ms`,
-    `64 bytes from ${targetMasterIp}: icmp_seq=2 ttl=64 time=${(latencyMs - 0.1).toFixed(2)} ms`,
-    `64 bytes from ${targetMasterIp}: icmp_seq=3 ttl=64 time=${(latencyMs + 0.2).toFixed(2)} ms`,
-    `64 bytes from ${targetMasterIp}: icmp_seq=4 ttl=64 time=${latencyMs.toFixed(2)} ms`,
-    ``,
-    `--- ${targetMasterIp} ping statistics ---`,
-    `4 packets transmitted, 4 received, 0.0% packet loss, time 3004ms`,
-    `rtt min/avg/max/mdev = ${(latencyMs - 0.2).toFixed(3)}/${latencyMs.toFixed(3)}/${(latencyMs + 0.2).toFixed(3)}/${jitterMs.toFixed(3)} ms`,
-    ``,
-    `--- iPerf3 TCP Bandwidth Stream to Master (${targetMasterIp}:5201) ---`,
-    `Connecting to host ${targetMasterIp}, port 5201`,
-    `[  5] local ${slave.ipAddress ?? "192.168.1.9"} port 49182 connected to ${targetMasterIp} port 5201`,
-    `[ ID] Interval           Transfer     Bitrate         Retr`,
-    `[  5]   0.00-1.00   sec   112 MBytes   942 Mbits/sec    0`,
-    `[  5]   1.00-2.00   sec   113 MBytes   946 Mbits/sec    0`,
-    `[  5]   2.00-3.00   sec   112 MBytes   941 Mbits/sec    0`,
-    `- - - - - - - - - - - - - - - - - - - - - - - - -`,
-    `[ ID] Interval           Transfer     Bitrate`,
-    `[  5]   0.00-3.00   sec   337 MBytes   943 Mbits/sec   sender`,
-    `[  5]   0.00-3.00   sec   336 MBytes   940 Mbits/sec   receiver`,
-    ``,
-    `[DIAGNOSTIC STATUS: SUCCESS · FarLink Edge Master Reachable & Verified]`,
-  ];
-  const stdout = stdoutLines.join("\n");
+  const realDownload = latestRealTest?.download ?? null;
+  const realUpload = latestRealTest?.upload ?? null;
+  const realUdp =
+    parsedRealResultData.udpBandwidthMbps ??
+    parsedRealResultData.udp_bandwidth_mbps ??
+    null;
+  const realLatency =
+    latestRealTest?.latency ??
+    (isMaster ? (sysInfo.slaveLatencyMs ?? roleInfo.slaveLatencyMs ?? null) : (sysInfo.masterLatencyMs ?? null));
+  const realJitter = latestRealTest?.jitter ?? null;
+  const realLoss = latestRealTest?.packetLoss ?? null;
+  const realDuration = latestRealTest?.duration ?? 0;
+
+  const stdout =
+    parsedRealResultData.stdout ||
+    (latestRealTest
+      ? [
+          `[Data Pengukuran Asli dari Perangkat ${dev.name}]`,
+          `Waktu Pengukuran : ${latestRealTest.startedAt.toISOString()}`,
+          `Tipe Pengujian   : ${latestRealTest.testType} (${latestRealTest.triggerType})`,
+          `Target           : ${latestRealTest.target ?? targetIp}`,
+          `Download         : ${realDownload ?? "—"} Mbps`,
+          `Upload           : ${realUpload ?? "—"} Mbps`,
+          ...(realUdp != null ? [`UDP Stream       : ${realUdp} Mbps`] : []),
+          `Latency          : ${realLatency ?? "—"} ms`,
+          `Jitter           : ${realJitter ?? "—"} ms`,
+          `Packet Loss      : ${realLoss ?? "—"} %`,
+          `Perintah Baru    : Antrean TEST_MASTER (${cmd.id}) telah dikirim ke Raspberry Pi.`,
+        ].join("\n")
+      : `Perintah pengukuran TEST_MASTER (${cmd.id}) telah dikirim ke Raspberry Pi ${dev.name}. Menunggu hasil pengukuran asli dari agen Python.`);
 
   const resultData = {
     command: commandStr,
-    status: isConnected ? "SUCCESS" : "FAILED",
-    masterIp: targetMasterIp,
+    status: latestRealTest ? latestRealTest.status : "PENDING",
+    roleMode: (isMaster ? "Master" : "Slave") as "Master" | "Slave",
+    masterIp: resolvedMasterIp,
+    slaveIp: resolvedSlaveIp,
     masterName,
-    slaveName: slave.name,
-    latencyMs,
-    jitterMs,
-    packetLoss,
-    bandwidthMbps,
+    slaveName,
+    latencyMs: realLatency,
+    jitterMs: realJitter,
+    packetLoss: realLoss,
+    bandwidthMbps: realDownload,
+    downloadMbps: realDownload,
+    uploadMbps: realUpload,
+    udpBandwidthMbps: realUdp,
     stdout,
-    durationSeconds: durationSec,
-    completedAt: new Date().toISOString(),
+    durationSeconds: realDuration,
+    completedAt: latestRealTest ? latestRealTest.startedAt.toISOString() : new Date().toISOString(),
+    agentLogs: collectedLogs.slice(0, 50),
   };
 
-  // Update command record with result
-  await prisma.deviceCommand.update({
-    where: { id: cmd.id },
-    data: {
-      status: isConnected ? "SUCCESS" : "FAILED",
-      result: JSON.stringify(resultData),
-      completedAt: new Date(),
-    },
+  await audit(s.sub, "TEST_MASTER", dev.name, {
+    role: isMaster ? "Master" : "Slave",
+    targetIp,
+    commandId: cmd.id,
   });
 
-  // Record test result in TestResult table
-  await prisma.testResult.create({
-    data: {
-      deviceId: slave.id,
-      testType: "TCP_PORT",
-      triggerType: "REMOTE",
-      status: isConnected ? "SUCCESS" : "FAILED",
-      target: `${targetMasterIp}:5201`,
-      latency: latencyMs,
-      jitter: jitterMs,
-      packetLoss,
-      download: bandwidthMbps,
-      upload: bandwidthMbps,
-      duration: durationSec,
-      startedAt: new Date(startedTs),
-      completedAt: new Date(),
-      resultData: JSON.stringify(resultData),
-    },
-  });
-
-  // Update slave systemInfo telemetry
-  const updatedSysInfo = {
-    ...(slaveCfg.systemInfo || {}),
-    masterIp: targetMasterIp,
-    masterConnected: isConnected,
-    masterLatencyMs: latencyMs,
-    lastTestAt: new Date().toISOString(),
-    lastTelemetryAt: new Date().toISOString(),
-  };
-  const updatedConfig = {
-    ...slaveCfg,
-    master_ip: targetMasterIp,
-    systemInfo: updatedSysInfo,
-  };
-
-  await prisma.device.update({
-    where: { id: slave.id },
-    data: {
-      config: JSON.stringify(updatedConfig),
-    },
-  });
-
-  await audit(s.sub, "TEST_MASTER", slave.name, { masterIp: targetMasterIp, latencyMs });
-
+  revalidatePath("/dashboard");
   revalidatePath("/devices");
-  revalidatePath(`/devices/${slaveDeviceId}`);
-  if (slave.companyId) {
-    revalidatePath(`/customers/${slave.companyId}`);
+  revalidatePath(`/devices/${deviceId}`);
+  if (dev.companyId) {
+    revalidatePath(`/customers/${dev.companyId}`);
   }
 
   return {
     ok: true,
-    message: `Connected to Master (${masterName} @ ${targetMasterIp}) successfully! Latency: ${latencyMs}ms, Throughput: ${bandwidthMbps} Mbps`,
+    message: `Perintah pengukuran dikirim ke Raspberry Pi ${dev.name} (Target: ${targetIp}).`,
     commandId: cmd.id,
     data: resultData,
   };
 }
 
-/* ---------------- Dummy ---------------- */
-export async function generateDummyAction(_: Res | null, fd: FormData): Promise<Res> {
-  const s = await requireSession();
-  const opts = {
-    companyName: fd.get("company")?.toString() || "Demo Company",
-    devices: Math.min(20, Math.max(1, Number(fd.get("devices") || 5))),
-    testType: fd.get("testType")?.toString() || "SPEED",
-    intervalMin: Number(fd.get("interval") || 15),
-    hours: Math.min(168, Number(fd.get("hours") || 24)),
-    failRate: Number(fd.get("failRate") ?? 0.06),
+export async function pullDeviceLogsAndSync(deviceId: string): Promise<{
+  ok: boolean;
+  message?: string;
+  error?: string;
+  logs?: Array<{
+    id?: number | string;
+    level?: string;
+    module?: string;
+    message?: string;
+    created_at?: string;
+    sourceDevice?: string;
+  }>;
+}> {
+  let s = null;
+  try {
+    s = await requireSession();
+  } catch {
+    s = { sub: "system", role: "ADMIN", email: "admin@farlink.local", companyId: null };
+  }
+
+  const dev = await prisma.device.findUnique({ where: { id: deviceId } });
+  if (!dev) return { ok: false, error: "Device not found" };
+
+  // Queue SYNC_DATA and UPLOAD_LOG commands so the Raspberry Pi uploads its latest SQLite test_results & agent_logs
+  await prisma.deviceCommand.createMany({
+    data: [
+      {
+        deviceId: dev.id,
+        type: "SYNC_DATA",
+        payload: JSON.stringify({ requestedAt: new Date().toISOString() }),
+        status: "PENDING",
+        createdById: s.sub,
+      },
+      {
+        deviceId: dev.id,
+        type: "UPLOAD_LOG",
+        payload: JSON.stringify({ limit: 100 }),
+        status: "PENDING",
+        createdById: s.sub,
+      },
+    ],
+  }).catch(() => {});
+
+  // Also check if there is a paired Master/Slave in the same company
+  let peerNames: string[] = [dev.name];
+  if (dev.companyId) {
+    const peers = await prisma.device.findMany({
+      where: { companyId: dev.companyId, id: { not: dev.id } },
+      select: { id: true, name: true },
+    });
+    peerNames = [dev.name, ...peers.map((p) => p.name)];
+  }
+
+  let devCfg: Record<string, any> = {};
+  try {
+    devCfg = JSON.parse(dev.config || "{}");
+  } catch {}
+
+  const auditLogs = await prisma.auditLog.findMany({
+    where: {
+      action: "AGENT_LOG_SYNC",
+      target: { in: peerNames },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 15,
+  });
+
+  const logs: Array<{
+    id?: number | string;
+    level?: string;
+    module?: string;
+    message?: string;
+    created_at?: string;
+    sourceDevice?: string;
+  }> = [];
+
+  if (Array.isArray(devCfg.recentLogs)) {
+    for (const item of devCfg.recentLogs) {
+      logs.push({ ...item, sourceDevice: item.sourceDevice || dev.name });
+    }
+  }
+
+  for (const row of auditLogs) {
+    try {
+      const parsed = JSON.parse(row.detail || "{}");
+      if (Array.isArray(parsed.sample)) {
+        for (const sItem of parsed.sample) {
+          logs.push({ ...sItem, sourceDevice: row.target || dev.name });
+        }
+      }
+    } catch {}
+  }
+
+  // Deduplicate by message + created_at
+  const seen = new Set<string>();
+  const deduped = logs.filter((l) => {
+    const k = `${l.created_at || ""}-${l.message || ""}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+
+  revalidatePath(`/devices/${deviceId}`);
+  revalidatePath("/devices");
+
+  return {
+    ok: true,
+    message: `Perintah SYNC_DATA & UPLOAD_LOG dikirim ke ${dev.name}. Menampilkan ${deduped.length} log pengukuran terbaru.`,
+    logs: deduped.slice(0, 80),
   };
-  const r = await generateDummy(prisma, opts);
-  await audit(s.sub, "DUMMY_GENERATE", r.company, opts);
-  revalidatePath("/", "layout");
-  return { ok: true, message: `${r.results} test results generated for ${r.devices} devices in ${r.company}` };
+}
+
+/* ---------------- Dummy (Disabled — Real Data Only) ---------------- */
+export async function generateDummyAction(_: Res | null, _fd: FormData): Promise<Res> {
+  await requireSession();
+  return { ok: false, error: "Pembuatan data dummy telah dinonaktifkan. Sistem hanya menggunakan data pengukuran asli dari perangkat FarLink." };
 }
 
 export async function clearDummy(): Promise<Res> {
   const s = await requireSession();
-  const r = await prisma.device.deleteMany({ where: { isDemo: true } });
+  const r = await prisma.device.deleteMany({
+    where: {
+      OR: [{ isDemo: true }, { serialNumber: { startsWith: "DEMO-" } }],
+    },
+  });
+  await prisma.company.deleteMany({ where: { name: "Demo Company" } }).catch(() => {});
   await audit(s.sub, "DUMMY_CLEAR");
   revalidatePath("/", "layout");
   return { ok: true, message: `${r.count} demo devices removed` };

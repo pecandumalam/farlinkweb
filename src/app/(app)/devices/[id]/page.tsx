@@ -30,6 +30,7 @@ import {
 import type { Point } from "@/components/CombinedChart";
 import { DeviceTypeBadge } from "@/components/DeviceTypeBadge";
 import { MasterConnectionTestCard, TestMasterModalButton } from "@/components/MasterConnectionTest";
+import { MeasurementActivityLogCards } from "@/components/MeasurementActivityLogCards";
 import { getDeviceRole } from "@/lib/device-utils";
 
 export async function generateMetadata({ params }: { params: Promise<{ id: string }> }) {
@@ -43,27 +44,23 @@ export default async function DevicePage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ tab?: string }>;
+  searchParams: Promise<{ tab?: string; date?: string }>;
 }) {
   const { id } = await params;
-  const { tab = "overview" } = await searchParams;
+  const { tab = "overview", date = "" } = await searchParams;
 
   const since48h = new Date(Date.now() - 48 * 3600_000);
 
-  const [device, companies, history, chartRaw, pendingCmds] = await Promise.all([
-    prisma.device.findUnique({ where: { id }, include: { company: true } }),
-    prisma.company.findMany({ select: { id: true, name: true }, orderBy: { name: "asc" } }),
-    prisma.testResult.findMany({ where: { deviceId: id }, orderBy: { startedAt: "desc" }, take: 20 }),
-    prisma.testResult.findMany({
-      where: { deviceId: id, testType: "SPEED", startedAt: { gte: since48h } },
-      select: { startedAt: true, download: true, upload: true, latency: true, triggerType: true, status: true },
-    }),
-    prisma.deviceCommand.findMany({
-      where: { deviceId: id, status: { in: ["PENDING", "SENT", "RUNNING"] } },
-      orderBy: { createdAt: "desc" },
-      take: 5,
-    }),
-  ]);
+  let device = await prisma.device.findUnique({ where: { id }, include: { company: true } });
+  if (!device && id === "cmwaersoc0004l208tpjbzyff") {
+    device = await prisma.device.findFirst({
+      where: {
+        OR: [{ name: { contains: "Master" } }, { type: "FARLINK_EDGE" }],
+      },
+      include: { company: true },
+      orderBy: { createdAt: "asc" },
+    });
+  }
 
   const s = await requireSession();
   const isAdmin = s.role === "ADMIN";
@@ -72,6 +69,24 @@ export default async function DevicePage({
   if (!isAdmin && s.companyId && device.companyId !== s.companyId) {
     notFound();
   }
+
+  const resolvedDeviceId = device.id;
+
+  const [companies, historyAll, chartRaw, pendingCmds] = await Promise.all([
+    prisma.company.findMany({ select: { id: true, name: true }, orderBy: { name: "asc" } }),
+    prisma.testResult.findMany({ where: { deviceId: resolvedDeviceId }, orderBy: { startedAt: "desc" }, take: 200 }),
+    prisma.testResult.findMany({
+      where: { deviceId: resolvedDeviceId, testType: { in: ["SPEED", "IPERF", "TCP_PORT"] }, startedAt: { gte: since48h } },
+      select: { startedAt: true, download: true, upload: true, latency: true, triggerType: true, status: true },
+    }),
+    prisma.deviceCommand.findMany({
+      where: { deviceId: resolvedDeviceId, status: { in: ["PENDING", "SENT", "RUNNING"] } },
+      orderBy: { createdAt: "desc" },
+      take: 5,
+    }),
+  ]);
+
+  const history = historyAll.slice(0, 20);
 
   const st = deviceStatus(device);
   const latest = history[0];
@@ -91,6 +106,7 @@ export default async function DevicePage({
 
   const tabs = [
     { k: "overview", l: "Overview" },
+    { k: "logs", l: "Measurement Logs" },
     { k: "ssh", l: "SSH Console" },
     { k: "graph", l: "Graph" },
     { k: "history", l: "Test History" },
@@ -102,6 +118,78 @@ export default async function DevicePage({
   const roleInfo = getDeviceRole(device);
   const isSlave = roleInfo.edgeMode === "Slave";
   const isMaster = roleInfo.edgeMode === "Master";
+
+  // Check if there is a Master device (when viewing a Slave) or Slave device (when viewing a Master)
+  let companyMasterDevice: { id: string; name: string; ipAddress: string | null } | null = null;
+  if (isSlave) {
+    if (device.companyId) {
+      companyMasterDevice = await prisma.device.findFirst({
+        where: {
+          companyId: device.companyId,
+          id: { not: device.id },
+          OR: [
+            { config: { contains: '"mode":"Master"' } },
+            { config: { contains: '"mode": "Master"' } },
+            { config: { contains: '"mode":"MASTER"' } },
+            { name: { contains: "Master" } },
+          ],
+        },
+        select: { id: true, name: true, ipAddress: true },
+      });
+    }
+    if (!companyMasterDevice) {
+      companyMasterDevice = await prisma.device.findFirst({
+        where: {
+          id: { not: device.id },
+          OR: [
+            { config: { contains: '"mode":"Master"' } },
+            { config: { contains: '"mode": "Master"' } },
+            { name: { contains: "Master" } },
+          ],
+        },
+        select: { id: true, name: true, ipAddress: true },
+        orderBy: { createdAt: "asc" },
+      });
+    }
+  }
+
+  const resolvedMasterIp = isSlave
+    ? (companyMasterDevice?.ipAddress || sysInfo?.masterIp || config.master_ip || config.masterIp || "192.168.2.38")
+    : (device.ipAddress || "192.168.2.38");
+
+  const resolveTestTarget = (rawTarget: string | null, testType: string): string | null => {
+    if (isSlave) {
+      const lower = (rawTarget || "").trim().toLowerCase();
+      if (
+        !rawTarget ||
+        lower === "speedtest.net" ||
+        lower === "speedtest server" ||
+        testType === "SPEED" ||
+        testType === "IPERF"
+      ) {
+        return resolvedMasterIp;
+      }
+    }
+    return rawTarget;
+  };
+
+  const serializedHistoryForCards = historyAll.map((r) => ({
+    id: r.id,
+    testType: r.testType,
+    triggerType: r.triggerType,
+    status: r.status,
+    target: resolveTestTarget(r.target, r.testType),
+    download: r.download,
+    upload: r.upload,
+    latency: r.latency,
+    jitter: r.jitter,
+    packetLoss: r.packetLoss,
+    duration: r.duration,
+    errorMessage: r.errorMessage,
+    resultData: r.resultData,
+    startedAt: r.startedAt.toISOString(),
+    completedAt: r.completedAt ? r.completedAt.toISOString() : null,
+  }));
 
   // Check if there is a Slave device registered in the same company
   let companySlaveDevice = null;
@@ -121,25 +209,89 @@ export default async function DevicePage({
     });
   }
 
-  // Resolved Slave Local IP (never P2P 192.168.99.x)
-  const resolvedSlaveIp = (() => {
-    let raw = roleInfo.slaveIp || sysInfo.slaveIp || config.slave_ip || config.slaveIp || companySlaveDevice?.ipAddress || null;
-    if (typeof raw === "string" && (raw.startsWith("192.168.99.") || raw === "127.0.0.1")) {
-      raw = null;
-    }
-    return raw;
-  })();
-
   const isCompanySlaveOnline = Boolean(
     companySlaveDevice?.lastSeenAt &&
     Date.now() - new Date(companySlaveDevice.lastSeenAt).getTime() < 120_000
   );
 
   const isSlaveNodeConnected = Boolean(
-    (sysInfo.slaveConnected !== undefined ? sysInfo.slaveConnected : null) ??
+    (sysInfo?.slaveConnected !== undefined ? sysInfo.slaveConnected : null) ??
     (roleInfo.isSlaveConnected !== undefined ? roleInfo.isSlaveConnected : null) ??
     (companySlaveDevice ? isCompanySlaveOnline : false)
   );
+
+  // Resolved Slave Local IP (supports Plug & Play 10.42.0.x, 192.168.99.x, or LAN IP)
+  const resolvedSlaveIp = (() => {
+    let raw = roleInfo.slaveIp || sysInfo?.slaveIp || config.slave_ip || config.slaveIp || companySlaveDevice?.ipAddress || null;
+    if (typeof raw === "string" && raw === "127.0.0.1") {
+      raw = null;
+    }
+    if (!raw && isSlaveNodeConnected) {
+      raw = "10.42.0.10 (Plug & Play)";
+    }
+    return raw;
+  })();
+
+  // Fetch synced agent measurement logs from config.recentLogs + AuditLog (AGENT_LOG_SYNC)
+  const auditLogTargets = [device.name, companySlaveDevice?.name].filter(Boolean) as string[];
+  const auditLogs = await prisma.auditLog.findMany({
+    where: {
+      action: "AGENT_LOG_SYNC",
+      ...(auditLogTargets.length ? { target: { in: auditLogTargets } } : {}),
+    },
+    orderBy: { createdAt: "desc" },
+    take: 15,
+  });
+
+  const initialAgentLogs: {
+    id?: number | string;
+    created_at?: string;
+    level?: string;
+    module?: string;
+    message?: string;
+    sourceDevice?: string;
+  }[] = [];
+  const seenLogKeys = new Set<string>();
+  const pushLogEntry = (entry: any, defaultSource: string) => {
+    if (!entry || !entry.message) return;
+    const ts = entry.created_at || entry.timestamp || "";
+    const key = `${ts}|${entry.level || "INFO"}|${entry.message}`;
+    if (seenLogKeys.has(key)) return;
+    seenLogKeys.add(key);
+    initialAgentLogs.push({
+      id: entry.id,
+      created_at: ts,
+      level: entry.level || "INFO",
+      module: entry.module || "agent",
+      message: entry.message,
+      sourceDevice: entry.sourceDevice || entry.source || defaultSource,
+    });
+  };
+  if (Array.isArray(config.recentLogs)) {
+    for (const l of config.recentLogs) pushLogEntry(l, device.name);
+  }
+  if (companySlaveDevice?.config) {
+    try {
+      const slaveCfg = JSON.parse(companySlaveDevice.config || "{}");
+      if (Array.isArray(slaveCfg.recentLogs)) {
+        for (const l of slaveCfg.recentLogs) pushLogEntry(l, `${companySlaveDevice.name} (Slave)`);
+      }
+    } catch {}
+  }
+  for (const row of auditLogs) {
+    try {
+      const parsed = JSON.parse(row.detail || "{}");
+      if (Array.isArray(parsed.sample)) {
+        for (const l of parsed.sample) {
+          pushLogEntry(
+            { ...l, created_at: l.created_at || l.timestamp || row.createdAt.toISOString() },
+            row.target || device.name
+          );
+        }
+      }
+    } catch {}
+  }
+  initialAgentLogs.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
 
   return (
     <>
@@ -171,10 +323,10 @@ export default async function DevicePage({
             className="btn btn-ghost"
             label="Check Real-Time Connection"
           />
-          {isSlave && (
+          {(isSlave || isMaster) && (
             <TestMasterModalButton
               device={device}
-              buttonLabel="Test Master"
+              buttonLabel={isMaster ? "Log & Test Edge" : "Test Master"}
               className="btn btn-primary"
             />
           )}
@@ -241,6 +393,52 @@ export default async function DevicePage({
         ))}
       </div>
 
+      {/* Measurement Logs Tab */}
+      {tab === "logs" && (
+        <div className="stack" style={{ gap: 16, marginBottom: 20 }}>
+          <MasterConnectionTestCard device={device} initialLogs={initialAgentLogs} />
+
+          <MeasurementActivityLogCards
+            deviceName={device.name}
+            testResults={serializedHistoryForCards}
+            agentLogs={initialAgentLogs}
+            initialDate={date}
+          />
+
+          <div className="card card-pad">
+            <h3 style={{ marginTop: 0, marginBottom: 8 }}>Cara Melihat Log Pengukuran Langsung di Raspberry Pi (Master &amp; Slave)</h3>
+            <p className="dim" style={{ fontSize: 13, marginBottom: 12 }}>
+              Anda juga dapat membuka tab <Link href={`/devices/${id}?tab=ssh`} style={{ textDecoration: "underline" }}>SSH Console</Link> atau login via SSH ke Raspberry Pi Master (`{device.ipAddress ?? "192.168.2.38"}`) dan Slave (`{resolvedSlaveIp ?? "10.42.0.10"}`) lalu menjalankan perintah berikut:
+            </p>
+            <pre
+              className="mono"
+              style={{
+                background: "#070b14",
+                color: "#cbd5e1",
+                padding: 14,
+                borderRadius: 8,
+                fontSize: 12,
+                lineHeight: 1.6,
+                overflowX: "auto",
+                border: "1px solid var(--border)",
+              }}
+            >{`# 1. Lihat live log service FarLink Agent (Master / Slave)
+sudo journalctl -u farlink-agent -f -n 100
+
+# 2. Lihat file log pengukuran Python Agent secara real-time
+tail -f ~/farlink/python/farlink_agent.log /var/log/farlink_agent.log 2>/dev/null
+
+# 3. Cek isi tabel hasil pengukuran & log di SQLite lokal Raspberry Pi
+sqlite3 ~/farlink/python/farlink_agent.db "SELECT id, timestamp, test_type, download_mbps, upload_mbps, latency_ms, jitter_ms, packet_loss, synced FROM test_results ORDER BY id DESC LIMIT 10;"
+sqlite3 ~/farlink/python/farlink_agent.db "SELECT id, timestamp, level, message, synced FROM agent_logs ORDER BY id DESC LIMIT 25;"
+
+# 4. Cek status daemon iPerf3 Server (Port 5201) & koneksi ke Slave
+ss -tulpn | grep 5201
+iperf3 -c 10.42.0.10 -p 5201 -t 5 -P 2`}</pre>
+          </div>
+        </div>
+      )}
+
       {/* SSH Terminal Tab */}
       {tab === "ssh" && (
         <div style={{ marginBottom: 20 }}>
@@ -255,7 +453,8 @@ export default async function DevicePage({
 
       {/* Overview */}
       {tab === "overview" && (
-        <div className="grid g-main" style={{ gap: 16 }}>
+        <>
+          <div className="grid g-main" style={{ gap: 16 }}>
           <div className="stack">
             {/* Edge Master Role Banner */}
             {isMaster && (
@@ -280,8 +479,10 @@ export default async function DevicePage({
               </div>
             )}
 
-            {/* Edge Slave Master Connection Test Card */}
-            {isSlave && <MasterConnectionTestCard device={device} />}
+            {/* Edge Master & Slave Connection Test + Measurement Logs Card */}
+            {(isSlave || isMaster) && (
+              <MasterConnectionTestCard device={device} initialLogs={initialAgentLogs} />
+            )}
 
             <div className="card">
               <div className="card-head">
@@ -511,10 +712,10 @@ export default async function DevicePage({
                         <dd className="mono">{latest.packetLoss}%</dd>
                       </>
                     )}
-                    {latest.target && (
+                    {resolveTestTarget(latest.target, latest.testType) && (
                       <>
                         <dt>Target</dt>
-                        <dd className="mono">{latest.target}</dd>
+                        <dd className="mono">{resolveTestTarget(latest.target, latest.testType)}</dd>
                       </>
                     )}
                     <dt>Duration</dt>
@@ -548,6 +749,15 @@ export default async function DevicePage({
             </div>
           </div>
         </div>
+
+        {/* Bottom Section: Card Log Aktivitas Pengukuran (Filter Tanggal & Limit 10 Data) */}
+        <MeasurementActivityLogCards
+          deviceName={device.name}
+          testResults={serializedHistoryForCards}
+          agentLogs={initialAgentLogs}
+          initialDate={date}
+        />
+      </>
       )}
 
       {/* Graph */}
@@ -564,14 +774,23 @@ export default async function DevicePage({
 
       {/* History */}
       {tab === "history" && (
-        <div className="card">
-          <div className="card-head">
-            <h2>Test History</h2>
-            <Link href={`/history?device=${id}`} className="btn btn-ghost btn-sm">
-              Full history
-            </Link>
+        <div className="stack" style={{ gap: 16 }}>
+          <div className="card">
+            <div className="card-head">
+              <h2>Test History</h2>
+              <Link href={`/history?device=${resolvedDeviceId}`} className="btn btn-ghost btn-sm">
+                Full history
+              </Link>
+            </div>
+            <HistoryTable rows={history} />
           </div>
-          <HistoryTable rows={history} />
+
+          <MeasurementActivityLogCards
+            deviceName={device.name}
+            testResults={serializedHistoryForCards}
+            agentLogs={initialAgentLogs}
+            initialDate={date}
+          />
         </div>
       )}
 

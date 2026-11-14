@@ -29,7 +29,7 @@ export default async function DashboardPage() {
     prisma.testResult.count({ where: { startedAt: { gte: start } } }),
     prisma.testResult.count({ where: { startedAt: { gte: start }, status: "SUCCESS" } }),
     prisma.testResult.findMany({ orderBy: { startedAt: "desc" }, take: 8, include: { device: { select: { id: true, name: true } } } }),
-    prisma.testResult.findMany({ where: { testType: "SPEED", startedAt: { gte: since } }, select: { startedAt: true, download: true, upload: true, latency: true, triggerType: true, status: true } }),
+    prisma.testResult.findMany({ where: { testType: { in: ["SPEED", "IPERF", "TCP_PORT"] }, startedAt: { gte: since } }, select: { startedAt: true, download: true, upload: true, latency: true, triggerType: true, status: true } }),
   ]);
 
   const st = devices.map((d) => ({ ...d, st: deviceStatus(d) }));

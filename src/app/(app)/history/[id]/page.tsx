@@ -3,11 +3,40 @@ import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { Badge } from "@/components/ui";
 import { fmtDateTime, TEST_LABEL, resultSummary } from "@/lib/constants";
+import { getDeviceRole } from "@/lib/device-utils";
 
 export default async function HistoryDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const r = await prisma.testResult.findUnique({ where: { id }, include: { device: { select: { id: true, name: true } } } });
+  const r = await prisma.testResult.findUnique({
+    where: { id },
+    include: { device: { select: { id: true, name: true, type: true, config: true, companyId: true } } },
+  });
   if (!r) notFound();
+
+  const roleInfo = getDeviceRole(r.device);
+  let resolvedTarget = r.target;
+  if (roleInfo.edgeMode === "Slave") {
+    const lower = (r.target || "").trim().toLowerCase();
+    if (!r.target || lower === "speedtest.net" || lower === "speedtest server" || r.testType === "SPEED" || r.testType === "IPERF") {
+      const masterDev = await prisma.device.findFirst({
+        where: {
+          id: { not: r.device.id },
+          OR: [
+            { config: { contains: '"mode":"Master"' } },
+            { config: { contains: '"mode": "Master"' } },
+            { name: { contains: "Master" } },
+          ],
+        },
+        select: { ipAddress: true },
+        orderBy: { createdAt: "asc" },
+      });
+      let cfg: Record<string, any> = {};
+      try {
+        cfg = JSON.parse(r.device.config || "{}");
+      } catch {}
+      resolvedTarget = masterDev?.ipAddress || cfg.master_ip || cfg.masterIp || cfg.systemInfo?.masterIp || "192.168.2.38";
+    }
+  }
 
   const rd = (() => { try { return JSON.parse(r.resultData) as Record<string, unknown>; } catch { return {}; } })();
 
@@ -32,7 +61,7 @@ export default async function HistoryDetailPage({ params }: { params: Promise<{ 
               <dt>Test type</dt><dd>{TEST_LABEL[r.testType] ?? r.testType}</dd>
               <dt>Trigger</dt><dd><Badge value={r.triggerType} dot={false} /></dd>
               <dt>Status</dt><dd><Badge value={r.status} /></dd>
-              {r.target && <><dt>Target</dt><dd className="mono">{r.target}</dd></>}
+              {resolvedTarget && <><dt>Target</dt><dd className="mono">{resolvedTarget}</dd></>}
               {r.download != null && <><dt>Download</dt><dd className="mono">{r.download} Mbps</dd></>}
               {r.upload != null && <><dt>Upload</dt><dd className="mono">{r.upload} Mbps</dd></>}
               {r.latency != null && <><dt>Latency</dt><dd className="mono">{r.latency} ms</dd></>}

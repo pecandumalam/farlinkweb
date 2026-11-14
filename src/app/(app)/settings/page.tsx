@@ -20,7 +20,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
   return (
     <>
       <div className="page-head">
-        <div><h1>Settings</h1><p>Manage accounts, users, demo data generation, and audit logs.</p></div>
+        <div><h1>Settings</h1><p>Manage accounts, users, and audit logs.</p></div>
       </div>
       <SettingsClient
         users={users}
