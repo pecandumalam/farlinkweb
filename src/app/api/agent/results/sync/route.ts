@@ -30,11 +30,14 @@ export async function POST(req: Request) {
 
     const roleInfo = getDeviceRole(d);
     let slaveMasterIp: string | null = null;
+    let masterSlaveTarget: string | null = null;
+
+    let dCfg: Record<string, any> = {};
+    try {
+      dCfg = JSON.parse(d.config || "{}");
+    } catch {}
+
     if (roleInfo.edgeMode === "Slave") {
-      let dCfg: Record<string, any> = {};
-      try {
-        dCfg = JSON.parse(d.config || "{}");
-      } catch {}
       const masterDev = await prisma.device.findFirst({
         where: {
           id: { not: d.id },
@@ -49,6 +52,13 @@ export async function POST(req: Request) {
         orderBy: { createdAt: "asc" },
       });
       slaveMasterIp = masterDev?.ipAddress || dCfg.master_ip || dCfg.masterIp || dCfg.systemInfo?.masterIp || "192.168.2.38";
+    } else if (roleInfo.edgeMode === "Master") {
+      const sys = dCfg.systemInfo || {};
+      const sIp = sys.slaveIp;
+      const sHost = sys.slaveHostname;
+      if (sIp) {
+        masterSlaveTarget = sHost ? `${sIp} (${sHost})` : sIp;
+      }
     }
 
     for (const it of items) {
@@ -64,9 +74,15 @@ export async function POST(req: Request) {
       const jitter = it.jitter_ms != null ? Number(it.jitter_ms) : (it.jitter != null ? Number(it.jitter) : null);
       const packetLoss = it.packet_loss != null ? Number(it.packet_loss) : (it.packetLoss != null ? Number(it.packetLoss) : null);
 
-      let target = it.target || it.server_ip || it.target_host || (testType === "IPERF" ? (it.master_connection?.target || slaveMasterIp || "Edge Slave Node") : (testType === "SPEED" ? (slaveMasterIp || "Speedtest Server") : null));
-      if (slaveMasterIp && (!target || target === "speedtest.net" || target === "Speedtest Server")) {
-        target = slaveMasterIp;
+      let target = it.target || it.server_ip || it.target_host;
+      if (!target || target === "speedtest.net" || target === "Speedtest Server") {
+        if (roleInfo.edgeMode === "Master") {
+          target = masterSlaveTarget || "FarLink Slave";
+        } else if (slaveMasterIp) {
+          target = slaveMasterIp;
+        } else {
+          target = testType === "IPERF" ? "Edge Peer Node" : "Speedtest Server";
+        }
       }
       const errorMessage = it.error_message || it.errorMessage || null;
 

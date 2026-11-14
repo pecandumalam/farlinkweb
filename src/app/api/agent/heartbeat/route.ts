@@ -54,6 +54,7 @@ export async function POST(req: Request) {
       })(),
       slaveConnected: Boolean(b.slave_connected ?? b.slaveConnected ?? false),
       slaveLatencyMs: (b.slave_connected || b.slaveConnected) ? (b.slave_latency_ms ?? b.slaveLatencyMs ?? null) : null,
+      slaveHostname: b.slave_hostname ?? b.slaveHostname ?? currentConfig?.systemInfo?.slaveHostname ?? null,
       lastTestAt: b.last_test_at ?? b.lastTestAt,
       lastTestResult: lastResultRaw,
       lastTelemetryAt: new Date().toISOString(),
@@ -123,9 +124,17 @@ export async function POST(req: Request) {
             const triggerType = ["SCHEDULED", "MANUAL", "REMOTE", "BUTTON"].includes(rawTrigger) ? rawTrigger : "SCHEDULED";
             const rawStatus = String(lastResultRaw.status || "SUCCESS").toUpperCase();
             const status = rawStatus === "SUCCESS" ? "SUCCESS" : "FAILED";
+            const isMaster =
+              currentConfig?.mode === "Master" ||
+              reportedMode === "Master" ||
+              d.name?.toLowerCase().includes("master");
+            const slaveTarget = telemetry.slaveIp
+              ? (telemetry.slaveHostname ? `${telemetry.slaveIp} (${telemetry.slaveHostname})` : telemetry.slaveIp)
+              : null;
             const target =
               lastResultRaw.target ||
               lastResultRaw.master_connection?.target ||
+              (isMaster ? (slaveTarget || "FarLink Slave") : null) ||
               telemetry.slaveIp ||
               telemetry.masterIp ||
               (testType === "IPERF" ? "Edge Peer Node" : "Speedtest Server");

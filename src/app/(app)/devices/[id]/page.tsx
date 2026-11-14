@@ -52,14 +52,14 @@ export default async function DevicePage({
   const since48h = new Date(Date.now() - 48 * 3600_000);
 
   let device = await prisma.device.findUnique({ where: { id }, include: { company: true } });
-  if (!device && id === "cmwaersoc0004l208tpjbzyff") {
-    device = await prisma.device.findFirst({
+  if (!device) {
+    device = (await prisma.device.findFirst({
       where: {
         OR: [{ name: { contains: "Master" } }, { type: "FARLINK_EDGE" }],
       },
       include: { company: true },
       orderBy: { createdAt: "asc" },
-    });
+    })) || (await prisma.device.findFirst({ include: { company: true } }));
   }
 
   const s = await requireSession();
@@ -157,40 +157,6 @@ export default async function DevicePage({
     ? (companyMasterDevice?.ipAddress || sysInfo?.masterIp || config.master_ip || config.masterIp || "192.168.2.38")
     : (device.ipAddress || "192.168.2.38");
 
-  const resolveTestTarget = (rawTarget: string | null, testType: string): string | null => {
-    if (isSlave) {
-      const lower = (rawTarget || "").trim().toLowerCase();
-      if (
-        !rawTarget ||
-        lower === "speedtest.net" ||
-        lower === "speedtest server" ||
-        testType === "SPEED" ||
-        testType === "IPERF"
-      ) {
-        return resolvedMasterIp;
-      }
-    }
-    return rawTarget;
-  };
-
-  const serializedHistoryForCards = historyAll.map((r) => ({
-    id: r.id,
-    testType: r.testType,
-    triggerType: r.triggerType,
-    status: r.status,
-    target: resolveTestTarget(r.target, r.testType),
-    download: r.download,
-    upload: r.upload,
-    latency: r.latency,
-    jitter: r.jitter,
-    packetLoss: r.packetLoss,
-    duration: r.duration,
-    errorMessage: r.errorMessage,
-    resultData: r.resultData,
-    startedAt: r.startedAt.toISOString(),
-    completedAt: r.completedAt ? r.completedAt.toISOString() : null,
-  }));
-
   // Check if there is a Slave device registered in the same company
   let companySlaveDevice = null;
   if (isMaster && device.companyId) {
@@ -231,6 +197,62 @@ export default async function DevicePage({
     }
     return raw;
   })();
+
+  const slaveHostname =
+    sysInfo?.slaveHostname ||
+    config.slave_hostname ||
+    config.slaveHostname ||
+    companySlaveDevice?.name ||
+    "farlink-slave-01";
+
+  const slaveTargetLabel = resolvedSlaveIp
+    ? (resolvedSlaveIp.includes("(") ? resolvedSlaveIp : `${resolvedSlaveIp} (${slaveHostname})`)
+    : `10.42.0.10 (${slaveHostname})`;
+
+  const resolveTestTarget = (rawTarget: string | null, testType: string): string | null => {
+    if (isSlave) {
+      const lower = (rawTarget || "").trim().toLowerCase();
+      if (
+        !rawTarget ||
+        lower === "speedtest.net" ||
+        lower === "speedtest server" ||
+        testType === "SPEED" ||
+        testType === "IPERF"
+      ) {
+        return resolvedMasterIp;
+      }
+    } else if (isMaster) {
+      const lower = (rawTarget || "").trim().toLowerCase();
+      if (
+        !rawTarget ||
+        lower === "speedtest.net" ||
+        lower === "speedtest server" ||
+        testType === "SPEED" ||
+        testType === "IPERF"
+      ) {
+        return slaveTargetLabel;
+      }
+    }
+    return rawTarget;
+  };
+
+  const serializedHistoryForCards = historyAll.map((r) => ({
+    id: r.id,
+    testType: (isMaster && (r.testType === "SPEED" || r.testType === "IPERF")) ? "TEST LAN" : r.testType,
+    triggerType: r.triggerType,
+    status: r.status,
+    target: resolveTestTarget(r.target, r.testType) || (isMaster ? slaveTargetLabel : null),
+    download: r.download,
+    upload: r.upload,
+    latency: r.latency,
+    jitter: r.jitter,
+    packetLoss: r.packetLoss,
+    duration: r.duration,
+    errorMessage: r.errorMessage,
+    resultData: r.resultData,
+    startedAt: r.startedAt.toISOString(),
+    completedAt: r.completedAt ? r.completedAt.toISOString() : null,
+  }));
 
   // Fetch synced agent measurement logs from config.recentLogs + AuditLog (AGENT_LOG_SYNC)
   const auditLogTargets = [device.name, companySlaveDevice?.name].filter(Boolean) as string[];
@@ -403,6 +425,8 @@ export default async function DevicePage({
             testResults={serializedHistoryForCards}
             agentLogs={initialAgentLogs}
             initialDate={date}
+            isMaster={isMaster}
+            slaveTargetLabel={slaveTargetLabel}
           />
 
           <div className="card card-pad">
@@ -672,7 +696,9 @@ iperf3 -c 10.42.0.10 -p 5201 -t 5 -P 2`}</pre>
                     <Gauge size={18} />
                   </div>
                   <div>
-                    <div style={{ fontWeight: 600 }}>Latest Test · {TEST_LABEL[latest.testType]}</div>
+                    <div style={{ fontWeight: 600 }}>
+                      Latest Test · {isMaster ? "TEST LAN" : (TEST_LABEL[latest.testType] ?? latest.testType)}
+                    </div>
                     <div className="dim" style={{ fontSize: 12 }}>
                       {fmtDateTime(latest.startedAt)} · <Badge value={latest.triggerType} dot={false} />
                     </div>
@@ -712,10 +738,16 @@ iperf3 -c 10.42.0.10 -p 5201 -t 5 -P 2`}</pre>
                         <dd className="mono">{latest.packetLoss}%</dd>
                       </>
                     )}
-                    {resolveTestTarget(latest.target, latest.testType) && (
+                    {(resolveTestTarget(latest.target, latest.testType) || (isMaster ? slaveTargetLabel : null)) && (
                       <>
                         <dt>Target</dt>
-                        <dd className="mono">{resolveTestTarget(latest.target, latest.testType)}</dd>
+                        <dd className="mono">
+                          {isMaster
+                            ? (!latest.target || latest.target === "Speedtest Server" || latest.target === "speedtest.net"
+                                ? slaveTargetLabel
+                                : resolveTestTarget(latest.target, latest.testType))
+                            : resolveTestTarget(latest.target, latest.testType)}
+                        </dd>
                       </>
                     )}
                     <dt>Duration</dt>
@@ -790,6 +822,8 @@ iperf3 -c 10.42.0.10 -p 5201 -t 5 -P 2`}</pre>
             testResults={serializedHistoryForCards}
             agentLogs={initialAgentLogs}
             initialDate={date}
+            isMaster={isMaster}
+            slaveTargetLabel={slaveTargetLabel}
           />
         </div>
       )}

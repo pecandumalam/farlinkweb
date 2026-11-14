@@ -95,11 +95,15 @@ export function MeasurementActivityLogCards({
   testResults,
   agentLogs = [],
   initialDate = "",
+  isMaster = false,
+  slaveTargetLabel = "",
 }: {
   deviceName: string;
   testResults: MeasurementTestRow[];
   agentLogs?: AgentLogEntry[];
   initialDate?: string;
+  isMaster?: boolean;
+  slaveTargetLabel?: string;
 }) {
   const [selectedDate, setSelectedDate] = useState<string>(initialDate);
   const [sourceFilter, setSourceFilter] = useState<"ALL" | "TEST_RESULT" | "AGENT_LOG">("ALL");
@@ -139,10 +143,19 @@ export function MeasurementActivityLogCards({
         }
       });
 
+      const displayTestType = isMaster && (r.testType === "SPEED" || r.testType === "IPERF" || r.testType === "TEST LAN")
+        ? "TEST LAN"
+        : (TEST_LABEL[r.testType] ?? r.testType);
+      const displayTarget = isMaster
+        ? (!r.target || r.target === "Speedtest Server" || r.target === "speedtest.net"
+            ? (slaveTargetLabel || "10.42.0.10 (farlink-slave-01)")
+            : r.target)
+        : (r.target ?? "Default Server");
+
       const defaultLogMsg =
         r.status === "FAILED"
-          ? `[ERROR] Pengukuran ${TEST_LABEL[r.testType] ?? r.testType} gagal: ${r.errorMessage || "Timeout / Unreachable"}`
-          : `[MEASUREMENT OK] ${TEST_LABEL[r.testType] ?? r.testType} (${r.triggerType}) → Target: ${r.target ?? "Default Server"}${
+          ? `[ERROR] Pengukuran ${displayTestType} gagal: ${r.errorMessage || "Timeout / Unreachable"}`
+          : `[MEASUREMENT OK] ${displayTestType} (${r.triggerType}) → Target: ${displayTarget}${
               r.download != null ? ` | DL: ${r.download} Mbps` : ""
             }${r.upload != null ? ` | UL: ${r.upload} Mbps` : ""}${
               udpBw != null ? ` | UDP: ${udpBw} Mbps` : ""
@@ -166,11 +179,13 @@ export function MeasurementActivityLogCards({
         kind: "TEST_RESULT",
         timestampIso: startDt.toISOString(),
         dateKey,
-        title: TEST_LABEL[r.testType] ?? `Pengukuran ${r.testType}`,
-        testType: r.testType,
+        title: isMaster && (r.testType === "SPEED" || r.testType === "IPERF" || r.testType === "TEST LAN")
+          ? "TEST LAN (Edge Master ↔ Slave)"
+          : (TEST_LABEL[r.testType] ?? `Pengukuran ${r.testType}`),
+        testType: isMaster && (r.testType === "SPEED" || r.testType === "IPERF") ? "TEST LAN" : r.testType,
         triggerType: r.triggerType,
         status: r.status,
-        target: r.target,
+        target: displayTarget,
         download: r.download,
         upload: r.upload,
         udpBandwidth: udpBw,
