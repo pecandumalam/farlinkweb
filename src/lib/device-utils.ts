@@ -32,11 +32,19 @@ export function getDeviceRole(device: {
   const cfgType = String(cfg.type || cfg.device_type || "").toUpperCase();
   const cfgMode = cfg.mode || cfg.device_mode;
 
+  const rawName = String((device as any)?.name || "").toUpperCase();
+  const isMasterByName = rawName.includes("MASTER");
+  const isSlaveByName = rawName.includes("SLAVE");
+
   const isEdge =
     rawType.includes("EDGE") ||
     cfgType.includes("EDGE") ||
     cfgMode === "Master" ||
-    cfgMode === "Slave";
+    cfgMode === "Slave" ||
+    isMasterByName ||
+    isSlaveByName ||
+    Boolean(cfg.systemInfo?.slaveIp) ||
+    Boolean(cfg.systemInfo?.slaveConnected);
 
   if (!isEdge) {
     return {
@@ -47,15 +55,15 @@ export function getDeviceRole(device: {
   }
 
   let edgeMode: DeviceEdgeMode = "Slave";
-  if (cfgMode === "Master") {
+  if (cfgMode === "Master" || isMasterByName) {
     edgeMode = "Master";
   } else if (cfgMode === "Standalone") {
     edgeMode = "Standalone";
-  } else if (cfgMode === "Slave") {
+  } else if (cfgMode === "Slave" || isSlaveByName) {
     edgeMode = "Slave";
   } else {
     // Default FarLink Edge is Slave unless specified
-    edgeMode = "Slave";
+    edgeMode = isMasterByName ? "Master" : "Slave";
   }
 
   const sysInfo = (typeof cfg.systemInfo === "object" && cfg.systemInfo) ? cfg.systemInfo : {};
